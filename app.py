@@ -37,7 +37,7 @@ def ensure_session_state():
     if "k" not in st.session_state:
         st.session_state.k = 6
     if "model" not in st.session_state:
-        st.session_state.model = "gpt-4o-mini"
+        st.session_state.model = "llama3.1"
     if "temperature" not in st.session_state:
         st.session_state.temperature = 0.0
 
@@ -76,7 +76,7 @@ def main():
         st.divider()
         st.header("Agent config")
         st.session_state.k = st.slider("Retrieve k chunks", min_value=2, max_value=10, value=st.session_state.k, step=1)
-        st.session_state.model = st.selectbox("LLM", ["gpt-4o-mini", "gpt-4o"], index=0)
+        st.session_state.model = st.selectbox("LLM", ["llama3.1"], index=0)
         st.session_state.temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=float(st.session_state.temperature), step=0.1)
 
         if st.button("(re)Create Agent"):
@@ -112,7 +112,8 @@ def main():
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     result = st.session_state.agent.invoke({"messages": [{"type": "human","content": prompt}]})
-                    answer = result["messages"][-1].content
+                    last_msg = result["messages"][-1]
+                    answer = last_msg.content if hasattr(last_msg, "content") else last_msg
                     st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
 
