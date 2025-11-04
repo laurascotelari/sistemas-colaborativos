@@ -80,14 +80,24 @@ def main():
         st.session_state.temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=float(st.session_state.temperature), step=0.1)
 
         if st.button("(re)Create Agent"):
-            if st.session_state.retriever is None:
-                st.warning("Build an index first.")
+            if "retriever" not in st.session_state or st.session_state.retriever is None:
+                st.warning("Build an index first (use 'Build/Update Index').")
             else:
-                llm = build_llm(model=st.session_state.model, temperature=st.session_state.temperature)
+                # Reconfigura o modelo LLM
+                llm = build_llm(
+                    model=st.session_state.model,
+                    temperature=st.session_state.temperature
+                )
+
+                # Atualiza o retriever com o número de chunks definido pelo usuário
                 retriever = st.session_state.retriever
                 retriever.search_kwargs["k"] = st.session_state.k
+
+                # Cria o agente e armazena no session_state
                 st.session_state.agent = build_agent(retriever, llm)
-                st.success("Agent is ready.")
+
+                st.success("Agent created and connected to the index.")
+
 
     st.subheader("Conversation (shared)")
 

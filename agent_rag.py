@@ -31,13 +31,16 @@ def build_embeddings(model: str = "text-embedding-3-small"):
     return OpenAIEmbeddings(model=model)
 
 def load_pdf_pages(path: str):
+    print(f"Loading PDF pages from {path}")
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     loader = PyPDFLoader(file_path=path)
     pages = loader.load()
+    print(f"Loaded {len(pages)} pages.")
     return pages
 
 def build_vectorstore_from_pages(pages, embeddings, persist_directory: str = VDB_DIR, collection_name: str = "pdfs"):
+    print(f"Building vectorstore in {persist_directory} under collection '{collection_name}'")
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_documents(pages)
     vs = Chroma.from_documents(documents=chunks, embedding=embeddings,
@@ -46,10 +49,12 @@ def build_vectorstore_from_pages(pages, embeddings, persist_directory: str = VDB
     return vs
 
 def build_retriever(vectorstore, k: int = 6):
+    print(f"Building retriever with k={k}")
     r = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": k})
     return r
 
 def read_collab_document() -> str:
+    print(f"Reading collaborative document from {DOC_STORE}")
     if not os.path.exists(DOC_STORE):
         return ""
     with open(DOC_STORE, "r", encoding="utf-8") as f:
@@ -60,6 +65,7 @@ def write_collab_document(content: str):
         f.write(content)
 
 def append_collab_document(content: str):
+    print("Appending to collaborative document.")
     existing = read_collab_document()
     new = existing + ("\n" if existing else "") + content
     write_collab_document(new)
@@ -91,6 +97,7 @@ def retriever_tool(query: str, retriever=None) -> str:
     """
     Busca no vectorstore (retriever.invoke) — o retriever é passado pela closure no agent builder.
     """
+    print("Invoking retriever tool.")
     if retriever is None:
         return "No retriever configured."
     docs = retriever.invoke(query)
@@ -108,6 +115,7 @@ def update_document_tool(new_text: str, user: str = "anonymous") -> str:
     """
     Atualiza (apenda) o documento colaborativo com um bloco novo.
     """
+    print("Invoking update_document_tool.")
     append_collab_document(f"{user}: {new_text}")
     current = read_collab_document()
     return f"Document updated by {user}. Current length: {len(current)} chars."
@@ -117,6 +125,7 @@ def save_document_tool(filename: str = "collab_doc.txt") -> str:
     """
     Salva o documento (o arquivo já está persistido em DOC_STORE; aqui podemos copiar para filename)
     """
+    print("Invoking save_document_tool.")
     try:
         content = read_collab_document()
         target = filename if filename.endswith(".txt") else f"{filename}.txt"
@@ -132,6 +141,7 @@ def summarize_tool(text: str, max_chars: int = 800) -> str:
     Summarize a text using a short LLM call. For simplicity we call a ChatOpenAI here synchronously.
     (In production you may want to route this through the same `llm.bind_tools` chain.)
     """
+    print("Invoking summarize_tool.")
     llm = build_llm()
     prompt = [
         SystemMessage(content="Você é um assistente que gera resumos claros e curtos."),
@@ -145,6 +155,7 @@ def vote_tool(key: str, user: str) -> str:
     """
     Vota em uma opção (key) por user. Retorna lista atual de votantes.
     """
+    print("Invoking vote_tool.")
     voters = add_vote(key, user)
     return f"Vote recorded for '{key}'. Current votes: {voters}"
 
@@ -153,17 +164,21 @@ def build_agent(retriever, llm):
     Monta o StateGraph que controla o loop LLM <-> tools.
     Tools disponíveis: retriever_tool (recebe retriever via closure), update_document_tool, save_document_tool, summarize_tool, vote_tool
     """
+    print("Building agent with tools.")
 
     def retriever_invoke(q: str):
         return retriever.invoke(q)
 
     @tool
     def _retriever_wrapper(query: str) -> str:
+        """ Wrapper para passar o retriever via closure."""
+        print("Invoking retriever wrapper tool.")
         return retriever_tool(query, retriever=retriever)
 
     tools = [_retriever_wrapper, update_document_tool, save_document_tool, summarize_tool, vote_tool]
     llm_with_tools = llm.bind_tools(tools)
     tools_dict = {t.name: t for t in tools}
+    print(f"Available tools: {list(tools_dict.keys())}")
 
     class AgentState(TypedDict):
         messages: Annotated[Sequence[BaseMessage], add_messages]
@@ -180,35 +195,42 @@ def build_agent(retriever, llm):
     def call_llm(state: AgentState):
         msgs = [SystemMessage(content=system_prompt)] + list(state["messages"])
         message = llm_with_tools.invoke(msgs)
+        print("LLM response received.")
+        print(f"LLM response content: {message.content}")
         return {"messages": [message]}
 
     def take_action(state: AgentState):
-        tool_calls = state["messages"][-1].tool_calls
+        last_message = state["messages"][-1]
+        tool_calls = getattr(last_message, "tool_calls", [])
         results = []
-        for t in tool_calls:
-            tool_name = t["name"]
-            args = t["args"] or {}
+        print(f"Processing {len(tool_calls)} tool calls.")
+
+        for call in tool_calls:
+            tool_name = call["name"]
+            args = call.get("args", {}) or {}
+
             if tool_name not in tools_dict:
                 result = f"Tool {tool_name} not found."
             else:
-                func = tools_dict[tool_name]
-
+                tool = tools_dict[tool_name]
                 try:
-                    result = func.invoke(**args)
-                except TypeError:
-                    if "query" in args:
-                        result = func.invoke(args["query"])
-                    elif "text" in args:
-                        result = func.invoke(args["text"])
-                    elif "filename" in args:
-                        result = func.invoke(args["filename"])
-                    elif "key" in args and "user" in args:
-                        result = func.invoke(args["key"], args["user"])
+                    if hasattr(tool, "invoke"):
+                        result = tool.invoke(args)
                     else:
-                        result = "Tool invocation failed due to args mismatch."
+                        result = tool.run(args)
+                except Exception as e:
+                    result = f"Error invoking tool {tool_name}: {e}"
 
-            results.append(ToolMessage(tool_call_id=t["id"], name=tool_name, content=str(result)))
+            results.append(
+                ToolMessage(
+                    tool_call_id=call["id"],
+                    name=tool_name,
+                    content=str(result),
+                )
+            )
+
         return {"messages": results}
+
 
     graph = StateGraph(AgentState)
     graph.add_node("llm", call_llm)
